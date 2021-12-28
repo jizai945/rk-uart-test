@@ -2,6 +2,10 @@
 #define __DEV_H__
 #include <iostream>
 #include <string>
+#include <thread>
+#include <mutex>
+#include <vector>
+#include <deque>
 using namespace std;
 
 
@@ -16,6 +20,10 @@ private:
     int bound;
     int fd;
     DEV_STATE state;
+    std::mutex _mtx;
+    std::thread* _thread;
+    deque<unsigned char> recv_buff;     // 接收缓存
+    vector<vector<unsigned char>> frame; // 解析成功的帧
 
 public:
     DEV() = delete;
@@ -27,6 +35,8 @@ public:
     bool start_send_test(int count);
     bool start_recv_test(int time);
     int get_version(void);
+private:
+    void recv_thread();
 };
 
 #endif

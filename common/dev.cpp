@@ -124,6 +124,7 @@ static uint8_t parse_checksum (uint8_t *buf, uint16_t len) {
 
 DEV::DEV(string dev, int bound):dev_name(dev), bound(bound) {
     state = DEV_CLOSE;
+    _thread == nullptr;
 }
 
 DEV::~DEV() {
@@ -230,31 +231,98 @@ bool DEV::start_send_test(int count) {
     return true;
 }
 
-bool DEV::start_recv_test(int time) {
+void DEV::recv_thread() {
     int size;
     unsigned char buf[1024] = {0}; 
-    while (time > 0) {
-        time -= 1;
+    
+    while (state != DEV_OPEN) sleep(1);
+   
+    while (1) {
+        // 接收
         size = read(fd, buf, 1024);
 		if (size <= 0) {
 			perror("read");
-            
 		} else {
-            // cout << GREEN << "[recv: " << size << "]";
-            printf(GREEN"[recv: %d]", size);
             for (int i = 0; i < size; i++) {
-                // cout << hex << buf[i] << " ";
-                printf(" 0x%x", buf[i]);
+                recv_buff.push_back(buf[i]);
             }
-            // cout << NONE <<endl;
-            printf(NONE"\n");
         }
-		sleep(1);	
+
+        // 解析
+        while (recv_buff.size() > 7) {
+            if (recv_buff[0] != 0x57 || recv_buff[1] != 0x59) {
+                recv_buff.pop_front();
+                continue;
+            }
+
+            // 数据长度
+            unsigned short data_len = ((unsigned short)(recv_buff[3] << 8) | recv_buff[4]);
+            if (recv_buff.size() < ( data_len + 5 + 2) ) {
+                break;
+            }
+
+            // 帧尾
+            if (recv_buff[data_len + 6] != 0xAA) {
+                recv_buff.pop_front();
+                continue;
+            }
+
+            // 校验
+            unsigned char check = 0;
+            for (int i = 0; i < data_len + 5; i++) {
+                check += recv_buff[i];
+            }
+            if (check != recv_buff[data_len + 5]) {
+                recv_buff.pop_front();
+                continue;
+            }
+
+            /* 解析成功 */
+            vector<unsigned char> tmp;
+            for (int i = 0; i < data_len + 5 + 2; i++) {
+                tmp.push_back(recv_buff[0]);
+                recv_buff.pop_front();
+            }
+            _mtx.lock();
+            frame.push_back(tmp);
+            _mtx.unlock();
+        }
+
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));  // 100ms
     }
+    
+}
+
+bool DEV::start_recv_test(int time) {
+    if (_thread != nullptr) {
+        _thread = new thread(&DEV::recv_thread, this);
+    }
+    
+    time *= 10;
+    while (time) {
+
+        // 打印接收
+        _mtx.lock();
+        if (!frame.empty()) {
+            vector<unsigned char> tmp = frame.front();
+            printf(GREEN"[recv: %d]", tmp.size());
+            for (int i = 0; i < tmp.size(); i ++) {
+                printf(" 0x%x", tmp[i]);
+            }
+            printf(NONE"\n");
+            frame.erase(frame.begin());
+        }
+        _mtx.unlock();
+
+        time--;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));  // 100ms
+    }
+
     return true;
 }
 
 int DEV::get_version(void) {
+    // 发送查询
     unsigned char send[] = {0x57, 0x59, 0x02, 0x00, 0x0C, 0xAA, 0x55, 0x00, 0x02 
                             , 0x75, 0x75, 0x4F, 0x06, 0x00, 0x00, 0x00, 0x00, 0xFE, 0xAA};
     int size;
@@ -266,21 +334,33 @@ int DEV::get_version(void) {
     }
 
     sleep(1);	
-    size = read(fd, buf, 1024);
-    if (size <= 0) {
-        perror("get version read");
-        
-    } else {
-        // cout << GREEN << "[recv: " << size << "]";
-        printf(GREEN"[recv: %d]", size);
-        for (int i = 0; i < size; i++) {
-            // cout << hex << buf[i] << " ";
-            printf(" 0x%x", buf[i]);
-        }
-        // cout << NONE <<endl;
-        printf(NONE"\n");
-    }
-    
 
-    return 0;
+    // 开启接收线程
+    if (_thread != nullptr) {
+        _thread = new thread(&DEV::recv_thread, this);
+    }
+
+    _mtx.lock();
+    if (!frame.empty()) {
+        cout << RED << "Read version err, not ACK" << NONE << endl;
+        _mtx.unlock();
+        return 1;
+    } else {
+        while (!frame.empty()) {
+            vector<unsigned char> tmp = frame.front();
+            if (tmp.size() > 6 && tmp[4] == 0x75 && tmp[5] == 0x75) {
+                printf(GREEN"Recv verison frame:");
+                for (int i = 0; i < tmp.size(); i++) {
+                    printf(" 0x%x", tmp[i]);
+                }
+                printf(NONE"\n");
+                _mtx.unlock();
+                return 0;
+            }
+        }
+    }
+
+    cout << RED << "Can Not Recv Version Frame" << NONE << endl;
+
+    return 1;
 }

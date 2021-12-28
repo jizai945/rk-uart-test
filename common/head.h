@@ -15,7 +15,8 @@
 #include <errno.h>
 #include <string.h>
 #include <assert.h>
-#include<pthread.h>
+#include <thread>
+#include <mutex>
 #include <linux/serial.h>
 #include <sys/ioctl.h>
 
