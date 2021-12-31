@@ -166,38 +166,24 @@ bool DEV::pclose() {
 }
 
 bool DEV::set_channel(unsigned char ch) {
-    unsigned char send_buf[512] = {}, sum;
-    unsigned char buf_tmp[] = {0xAA, 0x55, 0x00, 0x02, 0xda, 0xda, 0x00,
+    unsigned char buf_tmp[] = {0xAA, 0x55, 0x00, 0x02, 0x75, 0x75, 0x00,
 			0x00, 0x00, 0x00, 0x00, 0x00};
-    unsigned short crc16_tmp, pack_size;
+    unsigned short crc16_tmp;
     buf_tmp[3] = ch;
     crc16_tmp = parse_crc16(buf_tmp, sizeof(buf_tmp));
     buf_tmp[6] = crc16_tmp&0xff;
 	buf_tmp[7] = (crc16_tmp>>8)&0xff;
-    send_buf[0] = 0x57;
-    send_buf[1] = 0x59;
-    send_buf[2] = 0x02;
-    send_buf[3] = (sizeof(buf_tmp) >> 8) & 0xff;
-    send_buf[4] = (sizeof(buf_tmp) >> 0) & 0xff;
-    memcpy(&send_buf[4+1], buf_tmp, sizeof(buf_tmp));
-    // checksum
-    sum = parse_checksum (send_buf, (send_buf[3]<<8) + send_buf[4]+5);
-    send_buf[4 + (send_buf[3]<<8) + send_buf[4]+1] = sum;
-    // tail 
-    send_buf[4 + (send_buf[3]<<8) + send_buf[4]+2] = 0xAA;
-    // 包大小
-    pack_size = (send_buf[3]<<8) + send_buf[4]+7;
 
     printf(GREEN"[set channel: 0x%x]", ch);
-    for (int i = 0; i < pack_size; i++) {
+    for (int i = 0; i < sizeof(buf_tmp); i++) {
         // cout << " " << hex << write_buf[i];
 
-        printf("0x%x ", send_buf[i]);
+        printf("0x%x ", buf_tmp[i]);
     }
     // cout << NONE << endl;
     printf(NONE"\n");
 
-    if ((write(fd, send_buf, pack_size)) < 0) {
+    if ((write(fd, buf_tmp, sizeof(buf_tmp))) < 0) {
         perror("uart set channel");
         return false;
     }
@@ -206,9 +192,8 @@ bool DEV::set_channel(unsigned char ch) {
 }
 
 bool DEV::start_send_test(int count) {
-    unsigned char write_buf[] = {0x57, 0x59, 0x02, 0x00, 0x1B, 0xAA, 0x55, 0x0F, 0x06, 0xDA, 0xDA
-                            , 0xA3, 0x71, 0x00, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06
-                            , 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x21, 0xAA };
+    unsigned char write_buf[] = {0xaa, 0x55, 0x0f, 0x06, 0xda, 0xda, 0xa3, 0x71, 0x00, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03
+                                , 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f };
    
     while (count-- > 0) {
         // cout  << GREEN << "[send:]";
@@ -249,30 +234,31 @@ void DEV::recv_thread() {
         }
 
         // 解析
-        while (recv_buff.size() > 7) {
-            if (recv_buff[0] != 0x57 || recv_buff[1] != 0x59) {
+        while (recv_buff.size() >= 12) {
+            if (recv_buff[0] != 0xAA || recv_buff[1] != 0x55) {
                 recv_buff.pop_front();
                 continue;
             }
 
             // 数据长度
-            unsigned short data_len = ((unsigned short)(recv_buff[3] << 8) | recv_buff[4]);
-            if (recv_buff.size() < ( data_len + 5 + 2) ) {
+            unsigned char data_len = recv_buff[2];
+            if (recv_buff.size() < ( data_len + 12) ) {
+                DBG(YELLOW"Size short, need %d but now %d \n"NONE, ( data_len + 5 + 2), recv_buff.size());
                 break;
             }
 
-            // 帧尾
-            if (recv_buff[data_len + 6] != 0xAA) {
-                recv_buff.pop_front();
-                continue;
-            }
-
             // 校验
-            unsigned char check = 0;
-            for (int i = 0; i < data_len + 5; i++) {
-                check += recv_buff[i];
+            unsigned char buf_tmp[512] = {0};
+            for (int i = 0; i < data_len + 12; i++) {
+                buf_tmp[i] = recv_buff[i];
             }
-            if (check != recv_buff[data_len + 5]) {
+            buf_tmp[6] = 0x00;
+            buf_tmp[7] = 0x00;
+            unsigned short crc16_tmp = parse_crc16(buf_tmp, data_len + 12);
+            
+            if ((crc16_tmp&0xff) != recv_buff[6] || ((crc16_tmp>>8)&0xff) != recv_buff[7]) {
+                DBG(YELLOW"CRC Error, CRC Need: 0x%x 0x%x, But now: 0x%x 0x%x\n"NONE, 
+                        (crc16_tmp&0xff), ((crc16_tmp>>8)&0xff), recv_buff[6], recv_buff[7]);
                 recv_buff.pop_front();
                 continue;
             }
@@ -322,6 +308,12 @@ bool DEV::start_recv_test(int time) {
 }
 
 int DEV::get_version(void) {
+
+    // 开启接收线程
+    if (_thread != nullptr) {
+        _thread = new thread(&DEV::recv_thread, this);
+    }
+
     // 发送查询
     unsigned char send[] = {0x57, 0x59, 0x02, 0x00, 0x0C, 0xAA, 0x55, 0x00, 0x02 
                             , 0x75, 0x75, 0x4F, 0x06, 0x00, 0x00, 0x00, 0x00, 0xFE, 0xAA};
@@ -334,11 +326,6 @@ int DEV::get_version(void) {
     }
 
     sleep(1);	
-
-    // 开启接收线程
-    if (_thread != nullptr) {
-        _thread = new thread(&DEV::recv_thread, this);
-    }
 
     _mtx.lock();
     if (!frame.empty()) {

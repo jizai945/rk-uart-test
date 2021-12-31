@@ -2,7 +2,7 @@
 #include<head.h>
 
 int main(int argc, char **argv) {
-    int mode = -1, times = -1, bound = 115200, opt;
+    int mode = -1, times = -1, bound = 57600, opt;
     string dev_name = "/dev/ttyUSB5";
     unsigned char channel = 6;
 
